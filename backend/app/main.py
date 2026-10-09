@@ -5,6 +5,8 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncio
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -30,7 +32,11 @@ from app.providers.mock import (
 from app.providers.vast import VastSearchProvider
 from app.providers.vss_client import VssClient
 from app.providers.yolo import YoloDetectionProvider
+from app.fixtures import archive_lookup
 from app.schemas import (
+    ArchiveSearchRequest,
+    ArchiveSearchResponse,
+    ArchiveSearchResult,
     ErrorDetail,
     ErrorResponse,
     IncidentReport,
@@ -293,6 +299,98 @@ def _serve_local_range(path: Path, request: Request) -> Response:
         path=str(path),
         media_type="video/mp4",
         headers={"Accept-Ranges": "bytes"},
+    )
+
+
+@app.post("/api/search", response_model=ArchiveSearchResponse)
+async def archive_search(req: ArchiveSearchRequest) -> ArchiveSearchResponse:
+    """Archive-wide near-miss search. Does not require a pre-selected video_id."""
+    warnings: list[str] = []
+    results: list[ArchiveSearchResult] = []
+
+    if _mode == ProviderMode.mock or _live_search is None:
+        fixtures = archive_lookup(req.query)
+        for i, f in enumerate(fixtures):
+            # Stable mock video_id derived from fixture title
+            from app.video_registry import stable_video_id
+            mock_orig = f"mock://demo/{f.camera_id}/{f.location}"
+            vid = stable_video_id(mock_orig)
+            registry = get_registry()
+            registry.upsert(
+                original_video=mock_orig,
+                title=f.video_title,
+                location=f.location,
+                camera_id=f.camera_id,
+            )
+            results.append(ArchiveSearchResult(
+                video_id="demo-01",  # mock always points at demo video
+                title=f.video_title,
+                start_sec=f.start_sec,
+                end_sec=f.end_sec,
+                score=f.score,
+                caption=f.caption,
+                location=f.location,
+                camera_id=f.camera_id,
+                original_video=None,
+                source="mock",
+            ))
+        warnings.append("Demo fixtures — archive search not live.")
+        return ArchiveSearchResponse(
+            query=req.query, results=results, mode=ProviderMode.mock, warnings=warnings
+        )
+
+    # Live path: VSS semantic search across entire archive (no original_video filter)
+    try:
+        candidates = await asyncio.wait_for(
+            _live_search.search(
+                video_id="",
+                query=req.query,
+                top_k=req.top_k,
+                original_video=None,
+                object_classes=req.object_classes,
+            ),
+            timeout=settings.search_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        warnings.append(f"Archive search timed out after {settings.search_timeout_seconds:.0f}s.")
+        candidates = []
+    except Exception as exc:
+        logger.error("Archive search failed: %s", exc)
+        warnings.append(f"Archive search error: {exc}")
+        candidates = []
+
+    registry = get_registry()
+    for c in candidates:
+        if not c.original_video:
+            continue
+        entry = registry.upsert(
+            original_video=c.original_video,
+            title=(
+                c.extra.get("filename")
+                or f"{c.extra.get('location') or 'Clip'} · {c.extra.get('camera_id') or c.original_video[-20:]}"
+            ),
+            location=c.extra.get("location"),
+            camera_id=c.extra.get("camera_id"),
+            filename=c.extra.get("filename"),
+        )
+        results.append(ArchiveSearchResult(
+            video_id=entry.video_id,
+            title=entry.title,
+            start_sec=c.start_sec,
+            end_sec=c.end_sec,
+            score=c.score,
+            caption=c.caption,
+            location=entry.location,
+            camera_id=entry.camera_id,
+            original_video=c.original_video,
+            source="vss",
+        ))
+
+    if not results:
+        warnings.append("No matching clips found in the indexed archive for this query.")
+
+    return ArchiveSearchResponse(
+        query=req.query, results=results, mode=_mode, warnings=warnings
     )
 
 

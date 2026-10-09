@@ -32,7 +32,15 @@ class CosmosReasoningProvider:
     ) -> ReasoningResult:
         original = self._pending_original_video
         window_q = (
-            f"Between {start_sec:.1f}s and {end_sec:.1f}s: {question}. "
+            f"Analyze the segment from {start_sec:.1f}s to {end_sec:.1f}s for "
+            f"potential near-miss safety events. Question: {question}\n"
+            "Describe: (A) what objects and people are visibly doing, "
+            "(B) any potential near-miss or hazardous interaction, "
+            "(C) possible contributing factors such as shared pathways or obstructed sightlines, "
+            "(D) possible consequences if the situation worsened, "
+            "(E) one preventive recommendation. "
+            "Use language like 'potential contributing factor' and 'requires human verification'. "
+            "Do not claim verified distances, speeds, intentions, or causes not visible in the footage. "
             "Only use indexed segment evidence; do not invent timestamps."
         )
         if evidence:

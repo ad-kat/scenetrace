@@ -3,12 +3,22 @@ import {
   fetchHealth,
   fetchObjectClasses,
   fetchVideos,
+  postArchiveSearch,
   postInvestigate,
   postReport,
   resolveMediaUrl,
 } from "./api";
-import type { Event, IncidentReport, InvestigateResponse, TimelineEntry, VideoInfo } from "./types";
+import type {
+  ArchiveSearchResult,
+  Event,
+  IncidentReport,
+  InvestigateResponse,
+  TimelineEntry,
+  VideoInfo,
+} from "./types";
 import "./App.css";
+
+// ── helpers ──────────────────────────────────────────────────────────────────
 
 function fmtTime(sec: number): string {
   const m = Math.floor(sec / 60);
@@ -16,14 +26,66 @@ function fmtTime(sec: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+const EXAMPLE_QUERIES = [
+  "forklift approaching a pedestrian",
+  "worker standing in vehicle path",
+  "vehicle and pedestrian at intersection",
+  "person near moving industrial equipment",
+];
+
+// ── small components ─────────────────────────────────────────────────────────
+
 function VerificationBadge({ status }: { status: Event["verification"] }) {
   const labels: Record<Event["verification"], string> = {
-    verified_model: "Model verified",
+    verified_model: "Model-verified",
     retrieval_only: "Retrieval",
     unverified_mock: "MOCK",
   };
+  return <span className={`badge badge-${status}`}>{labels[status]}</span>;
+}
+
+function SearchResultCard({
+  result,
+  selected,
+  onSelect,
+}: {
+  result: ArchiveSearchResult;
+  selected: boolean;
+  onSelect: (r: ArchiveSearchResult) => void;
+}) {
   return (
-    <span className={`badge badge-${status}`}>{labels[status]}</span>
+    <article
+      className={`search-card${selected ? " search-card--selected" : ""}`}
+      onClick={() => onSelect(result)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => e.key === "Enter" && onSelect(result)}
+      aria-pressed={selected}
+    >
+      <header className="search-card__header">
+        <span className="search-card__time">
+          {fmtTime(result.start_sec)}–{fmtTime(result.end_sec)}
+        </span>
+        {result.score !== null && (
+          <span className="search-card__score">
+            {(result.score * 100).toFixed(0)}% match
+          </span>
+        )}
+        {result.source === "mock" && (
+          <span className="badge badge-unverified_mock">MOCK</span>
+        )}
+      </header>
+      <p className="search-card__title">{result.title}</p>
+      {(result.location || result.camera_id) && (
+        <div className="search-card__meta">
+          {result.location && <span className="meta-chip">📍 {result.location}</span>}
+          {result.camera_id && <span className="meta-chip">🎥 {result.camera_id}</span>}
+        </div>
+      )}
+      {result.caption && (
+        <p className="search-card__caption">{result.caption}</p>
+      )}
+    </article>
   );
 }
 
@@ -81,7 +143,7 @@ function EventCard({
       )}
       <footer className="event-card__actions">
         <button type="button" onClick={() => onJump(evt)}>Jump to moment</button>
-        <button type="button" onClick={() => onFollowUp(evt)}>Follow up</button>
+        <button type="button" onClick={() => onFollowUp(evt)}>Investigate surrounding footage</button>
       </footer>
     </article>
   );
@@ -100,7 +162,6 @@ function Timeline({
 }) {
   if (duration <= 0) return null;
   const pct = (sec: number) => `${((sec / duration) * 100).toFixed(2)}%`;
-
   return (
     <div
       className="timeline"
@@ -121,11 +182,7 @@ function Timeline({
       }}
     >
       <div className="timeline__track" />
-      <div
-        className="timeline__playhead"
-        style={{ left: pct(currentTime) }}
-        aria-hidden="true"
-      />
+      <div className="timeline__playhead" style={{ left: pct(currentTime) }} aria-hidden="true" />
       {events.map((evt) => (
         <button
           key={evt.event_id}
@@ -133,10 +190,7 @@ function Timeline({
           className="timeline__marker"
           style={{ left: pct(evt.start_sec), width: pct(Math.max(0.5, evt.end_sec - evt.start_sec)) }}
           title={`${fmtTime(evt.start_sec)} – ${fmtTime(evt.end_sec)}: ${evt.explanation}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            onSeek(evt.start_sec);
-          }}
+          onClick={(e) => { e.stopPropagation(); onSeek(evt.start_sec); }}
           aria-label={`Event at ${fmtTime(evt.start_sec)}`}
         />
       ))}
@@ -155,7 +209,6 @@ function InvestigationTimeline({
 }) {
   if (!entries.length) return null;
   const byId = new Map(events.map((e) => [e.event_id, e]));
-
   return (
     <section className="section section--inv-timeline" aria-label="Investigation timeline">
       <h2 className="section-title">Investigation timeline</h2>
@@ -175,12 +228,7 @@ function InvestigationTimeline({
                 const evt = byId.get(id);
                 if (!evt) return null;
                 return (
-                  <button
-                    key={id}
-                    type="button"
-                    className="inv-timeline__chip"
-                    onClick={() => onJump(evt)}
-                  >
+                  <button key={id} type="button" className="inv-timeline__chip" onClick={() => onJump(evt)}>
                     {fmtTime(evt.start_sec)}–{fmtTime(evt.end_sec)}
                   </button>
                 );
@@ -195,11 +243,11 @@ function InvestigationTimeline({
 
 function ReportPanel({ report }: { report: IncidentReport }) {
   return (
-    <section className="section section--report" aria-label="Incident report">
+    <section className="section section--report" aria-label="Safety investigation report">
       <h2 className="section-title">{report.title}</h2>
       <p className="report-summary">{report.summary}</p>
       {report.sections.map((sec, i) => (
-        <details key={i} className="report-section" open={i === 0}>
+        <details key={i} className="report-section" open={i < 3}>
           <summary className="report-section__heading">{sec.heading}</summary>
           <pre className="report-section__content">{sec.content}</pre>
         </details>
@@ -209,46 +257,55 @@ function ReportPanel({ report }: { report: IncidentReport }) {
   );
 }
 
+// ── main app ─────────────────────────────────────────────────────────────────
+
 export default function App() {
+  // Archive search
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResults, setSearchResults] = useState<ArchiveSearchResult[] | null>(null);
+  const [searchWarnings, setSearchWarnings] = useState<string[]>([]);
+  const [selectedResult, setSelectedResult] = useState<ArchiveSearchResult | null>(null);
+
+  // Video player
   const [videos, setVideos] = useState<VideoInfo[]>([]);
   const [selectedVideo, setSelectedVideo] = useState<VideoInfo | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Investigation
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<InvestigateResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [videoDuration, setVideoDuration] = useState(0);
   const [showTrace, setShowTrace] = useState(false);
-  const [videoError, setVideoError] = useState<string | null>(null);
-  const [providerMode, setProviderMode] = useState<string>("unknown");
+  const [allEvents, setAllEvents] = useState<Event[]>([]);
   const [objectClasses, setObjectClasses] = useState<string[]>([]);
   const [objectFilter, setObjectFilter] = useState<string>("");
-  const [allEvents, setAllEvents] = useState<Event[]>([]);
+
+  // Report
   const [report, setReport] = useState<IncidentReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Provider mode
+  const [providerMode, setProviderMode] = useState<string>("unknown");
 
   useEffect(() => {
     fetchHealth()
       .then((h) => setProviderMode(h.provider_mode))
       .catch(() => setProviderMode("unreachable"));
-
     fetchVideos()
-      .then((vs) => {
-        setVideos(vs);
-        if (vs.length > 0) setSelectedVideo(vs[0]);
-      })
+      .then((vs) => { setVideos(vs); if (vs.length > 0) setSelectedVideo(vs[0]); })
       .catch((err) => setError(`Failed to load video list: ${err.message}`));
-
     fetchObjectClasses()
       .then(setObjectClasses)
       .catch(() => setObjectClasses([]));
   }, []);
 
-  const videoSrc = selectedVideo?.video_url
-    ? resolveMediaUrl(selectedVideo.video_url)
-    : null;
+  const videoSrc = selectedVideo?.video_url ? resolveMediaUrl(selectedVideo.video_url) : null;
 
   function seekTo(sec: number) {
     const vid = videoRef.current;
@@ -292,9 +349,8 @@ export default function App() {
         return Array.from(map.values());
       });
       setSelectedEvent(null);
-      if (resp.events[0]) {
-        seekTo(resp.events[0].start_sec);
-      }
+      setReport(null);
+      if (resp.events[0]) seekTo(resp.events[0].start_sec);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -302,12 +358,52 @@ export default function App() {
     }
   }
 
+  async function handleArchiveSearch(e: React.FormEvent) {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+    setSearchLoading(true);
+    setSearchResults(null);
+    setSearchWarnings([]);
+    setError(null);
+    setResult(null);
+    setReport(null);
+    try {
+      const resp = await postArchiveSearch(searchQuery, 10);
+      setSearchResults(resp.results);
+      setSearchWarnings(resp.warnings);
+      setProviderMode(resp.mode);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSearchLoading(false);
+    }
+  }
+
+  function handleSelectResult(r: ArchiveSearchResult) {
+    setSelectedResult(r);
+    // Find or fall back to the first video in the list matching the result's video_id
+    const match = videos.find((v) => v.id === r.video_id) ?? (videos.length > 0 ? videos[0] : null);
+    if (match) {
+      if (selectedVideo?.id !== match.id) {
+        setSelectedVideo(match);
+        setResult(null);
+        setAllEvents([]);
+        setVideoError(null);
+      }
+      // Seek after video load
+      setTimeout(() => seekTo(r.start_sec), 100);
+    }
+    // Pre-populate investigation query from the search query
+    setQuery(searchQuery || `Investigate potential near-miss at ${fmtTime(r.start_sec)}`);
+    setReport(null);
+  }
+
   async function handleGenerateReport() {
     if (!result?.session_id) return;
     setReportLoading(true);
     setReport(null);
     try {
-      const r = await postReport(result.session_id);
+      const r = await postReport(result.session_id, "SceneTrace Safety Investigation Report");
       setReport(r);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -327,44 +423,110 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1 className="app-title">SceneTrace</h1>
-        <span className="app-subtitle">Evidence-grounded video investigation · Team 34</span>
-        <span
-          className={`mode-badge mode-badge--${providerMode}`}
-          aria-label={`Provider mode ${providerMode}`}
-        >
-          {isMock
-            ? "DEMO MODE — fixture data, not live inference"
-            : `LIVE · ${providerMode}`}
+        <span className="app-subtitle">Near-miss detection &amp; safety investigation · Team 34</span>
+        <span className={`mode-badge mode-badge--${providerMode}`} aria-label={`Provider mode ${providerMode}`}>
+          {isMock ? "DEMO MODE — fixture data, not live inference" : `LIVE · ${providerMode}`}
         </span>
       </header>
 
       <main className="app-main">
-        <section className="section section--selector" aria-label="Video selection">
-          <label htmlFor="video-select" className="field-label">Footage</label>
-          <select
-            id="video-select"
-            value={selectedVideo?.id ?? ""}
-            onChange={(e) => {
-              const v = videos.find((x) => x.id === e.target.value) ?? null;
-              setSelectedVideo(v);
-              setResult(null);
-              setSelectedEvent(null);
-              setAllEvents([]);
-              setVideoError(null);
-            }}
-          >
-            {videos.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.title}
-                {v.duration_sec ? ` (${fmtTime(v.duration_sec)})` : ""}
-              </option>
-            ))}
-          </select>
-          {selectedVideo && (
-            <span className="source-badge">source: {selectedVideo.source}</span>
+
+        {/* ── Archive Search ─────────────────────────────────────────── */}
+        <section className="section section--search" aria-label="Archive search">
+          <h2 className="section-title">Find Potential Near-Misses</h2>
+          <form onSubmit={handleArchiveSearch} className="search-form">
+            <div className="search-row">
+              <input
+                type="text"
+                className="search-input"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="e.g. forklift approaching a pedestrian in a warehouse aisle"
+                maxLength={500}
+                disabled={searchLoading}
+                autoFocus
+                aria-label="Search query"
+              />
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={searchLoading || !searchQuery.trim()}
+                aria-busy={searchLoading}
+              >
+                {searchLoading ? "Searching…" : "Search Archive"}
+              </button>
+            </div>
+            <div className="example-queries" aria-label="Example queries">
+              {EXAMPLE_QUERIES.map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  className="example-chip"
+                  onClick={() => setSearchQuery(q)}
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </form>
+
+          {searchWarnings.map((w, i) => (
+            <p key={i} className="results-warning">{w}</p>
+          ))}
+
+          {searchResults !== null && (
+            <div className="search-results" aria-live="polite">
+              {searchResults.length === 0 ? (
+                <p className="no-results">No matching clips found. Try a different query.</p>
+              ) : (
+                <>
+                  <p className="search-count">
+                    {searchResults.length} result{searchResults.length !== 1 ? "s" : ""} — click a clip to load it
+                  </p>
+                  <div className="search-cards">
+                    {searchResults.map((r, i) => (
+                      <SearchResultCard
+                        key={i}
+                        result={r}
+                        selected={selectedResult === r}
+                        onSelect={handleSelectResult}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           )}
         </section>
 
+        {/* ── Video selector (secondary) ────────────────────────────── */}
+        <details className="section section--selector">
+          <summary className="field-label">Or select footage directly</summary>
+          <div style={{ marginTop: 8 }}>
+            <select
+              value={selectedVideo?.id ?? ""}
+              onChange={(e) => {
+                const v = videos.find((x) => x.id === e.target.value) ?? null;
+                setSelectedVideo(v);
+                setResult(null);
+                setSelectedResult(null);
+                setAllEvents([]);
+                setVideoError(null);
+                setReport(null);
+              }}
+              aria-label="Select footage"
+            >
+              {videos.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.title}{v.duration_sec ? ` (${fmtTime(v.duration_sec)})` : ""}
+                </option>
+              ))}
+            </select>
+            {selectedVideo && <span className="source-badge" style={{ marginLeft: 8 }}>source: {selectedVideo.source}</span>}
+          </div>
+        </details>
+
+        {/* ── Video player ─────────────────────────────────────────── */}
         <section className="section section--player" aria-label="Video player">
           {videoSrc ? (
             <>
@@ -388,14 +550,15 @@ export default function App() {
               />
             </>
           ) : (
-            <div className="no-video">Select a video to begin.</div>
+            <div className="no-video">Search for near-misses above, or select a video to begin.</div>
           )}
         </section>
 
+        {/* ── Investigation ─────────────────────────────────────────── */}
         <section className="section section--query" aria-label="Investigation query">
           <form onSubmit={handleSubmit} className="query-form">
             <label htmlFor="query-input" className="field-label">
-              What do you want to investigate?
+              Investigate this footage
             </label>
             <div className="query-row">
               <input
@@ -407,7 +570,6 @@ export default function App() {
                 placeholder="e.g. forklift near a person in an aisle"
                 maxLength={500}
                 disabled={loading}
-                autoFocus
               />
               <button
                 type="submit"
@@ -415,13 +577,11 @@ export default function App() {
                 disabled={loading || !query.trim() || !selectedVideo}
                 aria-busy={loading}
               >
-                {loading ? "Searching…" : "Investigate"}
+                {loading ? "Investigating…" : "Investigate"}
               </button>
             </div>
             <div className="filter-row">
-              <label htmlFor="object-filter" className="field-label">
-                Object filter (YOLO metadata)
-              </label>
+              <label htmlFor="object-filter" className="field-label">Object filter (YOLO)</label>
               <select
                 id="object-filter"
                 value={objectFilter}
@@ -449,6 +609,7 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Investigation results ─────────────────────────────────── */}
         {result && (
           <section className="section section--results" aria-label="Investigation results">
             <div className="results-header">
@@ -489,20 +650,10 @@ export default function App() {
               >
                 <summary>Tool trace ({result.tool_trace.length} steps)</summary>
                 <table className="trace-table">
-                  <thead>
-                    <tr>
-                      <th>Tool</th>
-                      <th>Status</th>
-                      <th>ms</th>
-                    </tr>
-                  </thead>
+                  <thead><tr><th>Tool</th><th>Status</th><th>ms</th></tr></thead>
                   <tbody>
                     {result.tool_trace.map((t, i) => (
-                      <tr key={i}>
-                        <td>{t.tool}</td>
-                        <td>{t.status}</td>
-                        <td>{t.duration_ms}</td>
-                      </tr>
+                      <tr key={i}><td>{t.tool}</td><td>{t.status}</td><td>{t.duration_ms}</td></tr>
                     ))}
                   </tbody>
                 </table>
@@ -517,13 +668,15 @@ export default function App() {
                 disabled={reportLoading}
                 aria-busy={reportLoading}
               >
-                {reportLoading ? "Generating report…" : "Generate incident report"}
+                {reportLoading ? "Generating report…" : "Generate Safety Investigation Report"}
               </button>
             </div>
           </section>
         )}
 
+        {/* ── Safety report ─────────────────────────────────────────── */}
         {report && <ReportPanel report={report} />}
+
       </main>
     </div>
   );

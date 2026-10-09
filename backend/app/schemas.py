@@ -96,6 +96,32 @@ class InvestigateResponse(BaseModel):
     timeline: list[TimelineEntry] = Field(default_factory=list)
 
 
+class ArchiveSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    top_k: int = Field(default=10, ge=1, le=50)
+    object_classes: list[str] | None = None
+
+
+class ArchiveSearchResult(BaseModel):
+    video_id: str
+    title: str
+    start_sec: float
+    end_sec: float
+    score: float | None = None
+    caption: str | None = None
+    location: str | None = None
+    camera_id: str | None = None
+    original_video: str | None = None
+    source: str = "vss"  # "vss" | "mock"
+
+
+class ArchiveSearchResponse(BaseModel):
+    query: str
+    results: list[ArchiveSearchResult] = Field(default_factory=list)
+    mode: ProviderMode
+    warnings: list[str] = Field(default_factory=list)
+
+
 class IncidentReportRequest(BaseModel):
     session_id: str
     title: str | None = None

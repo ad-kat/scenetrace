@@ -58,6 +58,26 @@ export interface InvestigateResponse {
   timeline: TimelineEntry[];
 }
 
+export interface ArchiveSearchResult {
+  video_id: string;
+  title: string;
+  start_sec: number;
+  end_sec: number;
+  score: number | null;
+  caption: string | null;
+  location: string | null;
+  camera_id: string | null;
+  original_video: string | null;
+  source: string;
+}
+
+export interface ArchiveSearchResponse {
+  query: string;
+  results: ArchiveSearchResult[];
+  mode: "mock" | "live" | "hybrid";
+  warnings: string[];
+}
+
 export interface InvestigateRequest {
   video_id: string;
   query: string;

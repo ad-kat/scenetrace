@@ -168,6 +168,46 @@ def test_video_file_invalid_id_returns_404():
 
 
 # ---------------------------------------------------------------------------
+# Archive search
+# ---------------------------------------------------------------------------
+
+def test_archive_search_returns_results():
+    r = client.post("/api/search", json={"query": "forklift near a worker"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "results" in data
+    assert "mode" in data
+    assert "query" in data
+    assert isinstance(data["results"], list)
+    assert len(data["results"]) > 0
+    result = data["results"][0]
+    assert "video_id" in result
+    assert "start_sec" in result
+    assert "end_sec" in result
+    assert result["end_sec"] > result["start_sec"]
+
+
+def test_archive_search_blank_query_returns_422():
+    r = client.post("/api/search", json={"query": ""})
+    assert r.status_code == 422
+
+
+def test_archive_search_result_timestamps_are_valid():
+    r = client.post("/api/search", json={"query": "pedestrian"})
+    assert r.status_code == 200
+    for result in r.json()["results"]:
+        assert result["start_sec"] >= 0
+        assert result["end_sec"] > result["start_sec"]
+
+
+def test_archive_search_mock_warning():
+    r = client.post("/api/search", json={"query": "vehicle"})
+    data = r.json()
+    assert any("fixture" in w.lower() or "mock" in w.lower() or "demo" in w.lower()
+               for w in data["warnings"])
+
+
+# ---------------------------------------------------------------------------
 # Incident report
 # ---------------------------------------------------------------------------
 

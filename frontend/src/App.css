@@ -309,6 +309,54 @@ select {
 .trace-table th { text-align: left; color: var(--color-text-muted); font-weight: 600; padding: 2px 8px 2px 0; }
 .trace-table td { padding: 2px 8px 2px 0; font-family: monospace; }
 
+/* Archive search section */
+.section--search { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); padding: 16px; }
+.section-title { font-size: 1rem; font-weight: 600; color: var(--color-text); margin-bottom: 12px; }
+.search-form { display: flex; flex-direction: column; gap: 10px; }
+.search-row { display: flex; gap: 8px; }
+.search-input {
+  flex: 1;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  padding: 8px 12px;
+  font-size: 0.95rem;
+}
+.search-input:focus { outline: 2px solid var(--color-accent); border-color: var(--color-accent); }
+.example-queries { display: flex; gap: 6px; flex-wrap: wrap; }
+.example-chip {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  color: var(--color-text-muted);
+  padding: 3px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.example-chip:hover { border-color: var(--color-accent); color: var(--color-accent); }
+
+/* Search result cards */
+.search-count { font-size: 0.8rem; color: var(--color-text-muted); margin-bottom: 8px; }
+.search-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.search-card {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.search-card:hover { border-color: var(--color-accent); }
+.search-card--selected { border-color: var(--color-accent); box-shadow: 0 0 0 2px rgba(91,138,240,0.25); }
+.search-card__header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.search-card__time { font-size: 0.85rem; font-weight: 600; font-family: monospace; color: var(--color-accent); }
+.search-card__score { font-size: 0.75rem; color: var(--color-text-muted); margin-left: auto; }
+.search-card__title { font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; }
+.search-card__meta { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 5px; }
+.search-card__caption { font-size: 0.8rem; color: var(--color-text-muted); line-height: 1.4; }
+
 /* Location / camera meta chips */
 .event-card__meta { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .meta-chip {

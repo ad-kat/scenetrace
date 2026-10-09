@@ -1,4 +1,5 @@
 import type {
+  ArchiveSearchResponse,
   IncidentReport,
   InvestigateRequest,
   InvestigateResponse,
@@ -63,6 +64,19 @@ export async function fetchHealth(): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/health`);
   return handleResponse(res);
+}
+
+export async function postArchiveSearch(
+  query: string,
+  top_k = 10,
+  object_classes?: string[] | null,
+): Promise<ArchiveSearchResponse> {
+  const res = await fetch(`${API_BASE}/api/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, top_k, object_classes: object_classes ?? null }),
+  });
+  return handleResponse<ArchiveSearchResponse>(res);
 }
 
 export async function postReport(
