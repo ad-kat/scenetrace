@@ -350,9 +350,10 @@ async def run_investigation(
         if not labels and mode == ProviderMode.mock:
             labels = fixture_labels.get(c.start_sec, [])
 
-        explanation = c.caption or "Candidate interaction found in this segment."
+        explanation = c.caption or "Activity detected in this segment."
         if reasoning_text and not reasoning_text.startswith("[Mock"):
-            explanation = reasoning_text[:500]
+            # Prefer short retrieval caption on the card; full answer goes top-level.
+            explanation = c.caption or reasoning_text[:400]
 
         if mode == ProviderMode.mock:
             verification = VerificationStatus.unverified_mock

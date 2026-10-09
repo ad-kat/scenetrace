@@ -80,114 +80,139 @@ def generate_report(
         if src and src not in refs:
             refs.append(src)
 
-    # Observed behavior summary
-    if not all_events:
-        summary = "No near-miss candidates were identified in this investigation session."
-    else:
-        labels_flat: list[str] = []
-        for e in all_events:
-            labels_flat.extend(e.labels)
-        unique_labels = list(dict.fromkeys(labels_flat))
-        label_str = ", ".join(unique_labels) if unique_labels else "unclassified activity"
-        summary = (
-            f"Investigation identified {len(all_events)} potential near-miss candidate(s) "
-            f"involving {label_str}, across {len(timeline)} investigation turn(s). "
-            "All findings require human verification."
-        )
+    # Build findings from actual retrieval and reasoning evidence.
+    summary = (
+        f"Reviewed {len(all_events)} retrieved video moment(s) across "
+        f"{len(timeline)} investigation turn(s). These are candidate "
+        "safety observations, not confirmed near-misses."
+        if all_events else "No candidate moments were found in this investigation."
+    )
 
     sections: list[IncidentReportSection] = []
+    observations, assessments, factors, consequences, prevention = [], [], [], [], []
 
-    # A. Observed behavior
-    if all_events:
-        obs_lines: list[str] = []
-        for i, e in enumerate(all_events):
-            loc_str = f" [{e.location or ''}{(' · ' + e.camera_id) if e.camera_id else ''}]".rstrip(" ·[]")
-            line = (
-                f"Finding {i+1}: [{_fmt_time(e.start_sec)}–{_fmt_time(e.end_sec)}]{loc_str}\n"
-                f"  {e.explanation}\n"
-                f"  Detected objects: {', '.join(e.labels) or 'none'}\n"
-                f"  Verification: {_verification_label(e.verification)}"
-            )
-            if e.evidence:
-                for ev in e.evidence:
-                    if ev.kind == "reasoning" and ev.detail:
-                        line += f"\n  Reasoning: {ev.detail[:500]}"
-                        break
-            obs_lines.append(line)
-        sections.append(IncidentReportSection(
-            heading="A. Observed Behavior",
-            content="\n\n".join(obs_lines),
+    for i, e in enumerate(all_events, 1):
+        stamp = f"{_fmt_time(e.start_sec)}–{_fmt_time(e.end_sec)}"
+        retrieval = " ".join(
+            ev.detail for ev in e.evidence
+            if ev.kind == "retrieval" and ev.detail
+        )
+        reasoning = next(
+            (ev.detail for ev in e.evidence
+             if ev.kind == "reasoning" and ev.detail), ""
+        )
+        description = retrieval or e.explanation or "No scene description available."
+        text = description.lower()
+
+        observations.append(
+            f"Finding {i} [{stamp}] | {e.camera_id or 'Unknown camera'}\n"
+            f"Source: {e.filename or e.original_video or 'Unavailable'}\n"
+            f"Observed scene: {description}\n"
+            f"Analysis: {reasoning[:900] if reasoning else 'No model reasoning available.'}\n"
+            f"Evidence status: {_verification_label(e.verification)}"
+        )
+
+        stopped = any(x in text for x in (
+            "cyclist is stopped", "rider is stopped",
+            "vehicle is stopped", "cyclist is stationary"
+        ))
+        obstruction = any(x in text for x in (
+            "blocking the road", "blocking the lane",
+            "partially blocking", "obstruct", "barrier",
+            "barricade", "narrow gap", "narrow passage"
+        ))
+        moving_conflict = any(x in text for x in (
+            "swerv", "brak", "avoid a collision",
+            "almost collided", "narrowly missed",
+            "close pass", "crossing in front",
+            "entered the path"
+        ))
+        bike = any(x in text for x in (
+            "cyclist", "bicycle", "bike lane", "rider"
         ))
 
-    # B. Potential near-miss assessment
-    nearmiss_lines: list[str] = []
-    for i, e in enumerate(all_events):
-        has_forklift = any("forklift" in l.lower() for l in e.labels)
-        has_person = any(l.lower() in ("person", "pedestrian", "worker") for l in e.labels)
-        has_vehicle = any("vehicle" in l.lower() for l in e.labels)
-        if has_forklift and has_person:
-            assessment = (
-                "Forklift and person detected in the same segment. "
-                "This is a potential near-miss: a forklift operating in proximity to a pedestrian "
-                "without confirmed safe separation. Requires human verification of actual distance and intent."
+        if moving_conflict:
+            assessment = "Possible movement conflict worth reviewing."
+        elif obstruction:
+            assessment = "Roadway obstruction or restricted passage; potential hazard."
+        else:
+            assessment = "No clear near-miss established by the retrieved description."
+
+        if stopped and not moving_conflict:
+            assessment += " The described rider or vehicle is stopped."
+
+        assessments.append(f"Finding {i} [{stamp}]: {assessment}")
+
+        if obstruction:
+            factors.append(
+                f"Finding {i} [{stamp}]: The described obstruction may reduce "
+                "available clearance or visibility. Actual distances are unknown."
             )
-        elif has_vehicle and has_person:
-            assessment = (
-                "Vehicle and person detected in the same segment. "
-                "Potential hazardous interaction — requires review of relative trajectories."
+            consequences.append(
+                f"Finding {i} [{stamp}]: If a moving rider encounters this "
+                "restriction without sufficient clearance, a collision with "
+                "an obstacle or nearby road user could become possible."
             )
-        elif e.labels:
-            assessment = (
-                f"Objects detected: {', '.join(e.labels)}. "
-                "Whether a near-miss occurred requires human review of the footage."
+            prevention.append(
+                f"Finding {i} [{stamp}]: Reduce approach speed before the "
+                "obstruction, check for approaching traffic, and proceed "
+                "only if sufficient passing clearance is available."
+            )
+        elif moving_conflict:
+            factors.append(
+                f"Finding {i} [{stamp}]: Review the visible trajectories, "
+                "available separation, visibility, and opportunity to react. "
+                "The actual speed is not measured."
+            )
+            consequences.append(
+                f"Finding {i} [{stamp}]: Conflicting movement could create "
+                "collision risk if clearance or reaction time is insufficient."
+            )
+            prevention.append(
+                f"Finding {i} [{stamp}]: Adjust speed to the available "
+                "visibility, preserve clearance, anticipate movements by "
+                "other road users, and avoid sudden unsafe maneuvers."
+            )
+        elif bike:
+            factors.append(
+                f"Finding {i} [{stamp}]: No specific hazardous interaction "
+                "is established. Review available space and visibility."
+            )
+            consequences.append(
+                f"Finding {i} [{stamp}]: No concrete accident consequence "
+                "can be attributed to this segment from the available evidence."
+            )
+            prevention.append(
+                f"Finding {i} [{stamp}]: General cycling precautions include "
+                "maintaining a speed appropriate to sightlines and road "
+                "conditions and keeping adequate clearance. This is "
+                "general advice, not a finding of unsafe riding."
             )
         else:
-            assessment = "No specific near-miss pattern identified from available detections."
-        nearmiss_lines.append(f"Finding {i+1} [{_fmt_time(e.start_sec)}–{_fmt_time(e.end_sec)}]: {assessment}")
-    if nearmiss_lines:
+            factors.append(
+                f"Finding {i} [{stamp}]: Insufficient evidence to identify "
+                "a specific contributing factor."
+            )
+            consequences.append(
+                f"Finding {i} [{stamp}]: No supported incident-specific "
+                "consequence identified."
+            )
+            prevention.append(
+                f"Finding {i} [{stamp}]: Review the original footage before "
+                "making an incident-specific safety recommendation."
+            )
+
+    for heading, lines in [
+        ("A. Observed Behavior", observations),
+        ("B. Potential Near-Miss Assessment", assessments),
+        ("C. Possible Contributing Factors", factors),
+        ("D. Possible Consequences", consequences),
+        ("E. Preventive Recommendations", prevention),
+    ]:
         sections.append(IncidentReportSection(
-            heading="B. Potential Near-Miss Assessment",
-            content="\n\n".join(nearmiss_lines),
+            heading=heading,
+            content="\n\n".join(lines) if lines else "No supported findings available.",
         ))
-
-    # C. Possible contributing factors
-    factor_lines = [
-        "Possible contributing factors — these are hypotheses for human review, not verified causes:",
-        "  • Shared pedestrian-vehicle pathways without physical separation",
-        "  • Reduced sightlines at aisle intersections or loading zones",
-        "  • Forklift travel routes overlapping with pedestrian access areas",
-        "  • Absence of visible warning signals or audible alerts in retrieved footage",
-        "  • Worker positioned outside marked safety zones (if applicable — verify in footage)",
-    ]
-    sections.append(IncidentReportSection(
-        heading="C. Possible Contributing Factors",
-        content="\n".join(factor_lines),
-    ))
-
-    # D. Possible consequences
-    sections.append(IncidentReportSection(
-        heading="D. Possible Consequences",
-        content=(
-            "If a similar situation were to escalate without intervention:\n"
-            "  • Worker-forklift collision leading to serious injury\n"
-            "  • Vehicle strike of a pedestrian in a shared traffic zone\n"
-            "  • Property damage from unexpected vehicle maneuvers\n"
-            "Note: SceneTrace does not assert that any of these consequences occurred or are certain."
-        ),
-    ))
-
-    # E. Preventive recommendations
-    sections.append(IncidentReportSection(
-        heading="E. Preventive Recommendations",
-        content=(
-            "Recommendations for safety team review (not prescriptive — verify against site conditions):\n"
-            "  • Review pedestrian-forklift separation protocols in the identified zones\n"
-            "  • Inspect physical barriers, floor markings, and sightline obstructions at these locations\n"
-            "  • Review operator proximity alert and speed-limit compliance in active zones\n"
-            "  • Consider adding camera coverage at blind corners or high-traffic intersections\n"
-            "  • Schedule a safety walkthrough of the locations identified in this report"
-        ),
-    ))
 
     # F. Evidence and uncertainty
     if refs:
