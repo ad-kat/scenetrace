@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchVideos, postInvestigate } from "./api";
-import type { Event, InvestigateResponse, VideoInfo } from "./types";
+import {
+  fetchHealth,
+  fetchObjectClasses,
+  fetchVideos,
+  postInvestigate,
+  postReport,
+  resolveMediaUrl,
+} from "./api";
+import type { Event, IncidentReport, InvestigateResponse, TimelineEntry, VideoInfo } from "./types";
 import "./App.css";
-
-const API_BASE: string =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-  "http://localhost:8000";
 
 function fmtTime(sec: number): string {
   const m = Math.floor(sec / 60);
@@ -15,9 +18,9 @@ function fmtTime(sec: number): string {
 
 function VerificationBadge({ status }: { status: Event["verification"] }) {
   const labels: Record<Event["verification"], string> = {
-    verified_model: "✓ Model verified",
-    retrieval_only: "⚡ Retrieval",
-    unverified_mock: "⚙ MOCK",
+    verified_model: "Model verified",
+    retrieval_only: "Retrieval",
+    unverified_mock: "MOCK",
   };
   return (
     <span className={`badge badge-${status}`}>{labels[status]}</span>
@@ -57,6 +60,12 @@ function EventCard({
           </span>
         )}
       </header>
+      {(evt.location || evt.camera_id) && (
+        <div className="event-card__meta">
+          {evt.location && <span className="meta-chip">📍 {evt.location}</span>}
+          {evt.camera_id && <span className="meta-chip">🎥 {evt.camera_id}</span>}
+        </div>
+      )}
       <p className="event-card__explanation">{evt.explanation}</p>
       {evt.evidence.length > 0 && (
         <details className="event-card__evidence">
@@ -71,8 +80,8 @@ function EventCard({
         </details>
       )}
       <footer className="event-card__actions">
-        <button onClick={() => onJump(evt)}>Jump to moment</button>
-        <button onClick={() => onFollowUp(evt)}>Follow up</button>
+        <button type="button" onClick={() => onJump(evt)}>Jump to moment</button>
+        <button type="button" onClick={() => onFollowUp(evt)}>Follow up</button>
       </footer>
     </article>
   );
@@ -120,8 +129,9 @@ function Timeline({
       {events.map((evt) => (
         <button
           key={evt.event_id}
+          type="button"
           className="timeline__marker"
-          style={{ left: pct(evt.start_sec), width: pct(evt.end_sec - evt.start_sec) }}
+          style={{ left: pct(evt.start_sec), width: pct(Math.max(0.5, evt.end_sec - evt.start_sec)) }}
           title={`${fmtTime(evt.start_sec)} – ${fmtTime(evt.end_sec)}: ${evt.explanation}`}
           onClick={(e) => {
             e.stopPropagation();
@@ -131,6 +141,71 @@ function Timeline({
         />
       ))}
     </div>
+  );
+}
+
+function InvestigationTimeline({
+  entries,
+  events,
+  onJump,
+}: {
+  entries: TimelineEntry[];
+  events: Event[];
+  onJump: (evt: Event) => void;
+}) {
+  if (!entries.length) return null;
+  const byId = new Map(events.map((e) => [e.event_id, e]));
+
+  return (
+    <section className="section section--inv-timeline" aria-label="Investigation timeline">
+      <h2 className="section-title">Investigation timeline</h2>
+      <ol className="inv-timeline">
+        {entries.map((turn, idx) => (
+          <li key={turn.turn_id} className="inv-timeline__item">
+            <div className="inv-timeline__turn">Turn {idx + 1}</div>
+            <div className="inv-timeline__query">{turn.query}</div>
+            {turn.follow_up_of && (
+              <div className="inv-timeline__meta">Follow-up of prior evidence</div>
+            )}
+            {turn.answer_preview && (
+              <p className="inv-timeline__preview">{turn.answer_preview}</p>
+            )}
+            <div className="inv-timeline__events">
+              {turn.event_ids.map((id) => {
+                const evt = byId.get(id);
+                if (!evt) return null;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    className="inv-timeline__chip"
+                    onClick={() => onJump(evt)}
+                  >
+                    {fmtTime(evt.start_sec)}–{fmtTime(evt.end_sec)}
+                  </button>
+                );
+              })}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function ReportPanel({ report }: { report: IncidentReport }) {
+  return (
+    <section className="section section--report" aria-label="Incident report">
+      <h2 className="section-title">{report.title}</h2>
+      <p className="report-summary">{report.summary}</p>
+      {report.sections.map((sec, i) => (
+        <details key={i} className="report-section" open={i === 0}>
+          <summary className="report-section__heading">{sec.heading}</summary>
+          <pre className="report-section__content">{sec.content}</pre>
+        </details>
+      ))}
+      <p className="report-meta">Report ID: {report.report_id} · {report.generated_at}</p>
+    </section>
   );
 }
 
@@ -146,21 +221,33 @@ export default function App() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [showTrace, setShowTrace] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
+  const [providerMode, setProviderMode] = useState<string>("unknown");
+  const [objectClasses, setObjectClasses] = useState<string[]>([]);
+  const [objectFilter, setObjectFilter] = useState<string>("");
+  const [allEvents, setAllEvents] = useState<Event[]>([]);
+  const [report, setReport] = useState<IncidentReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
+    fetchHealth()
+      .then((h) => setProviderMode(h.provider_mode))
+      .catch(() => setProviderMode("unreachable"));
+
     fetchVideos()
       .then((vs) => {
         setVideos(vs);
         if (vs.length > 0) setSelectedVideo(vs[0]);
       })
       .catch((err) => setError(`Failed to load video list: ${err.message}`));
+
+    fetchObjectClasses()
+      .then(setObjectClasses)
+      .catch(() => setObjectClasses([]));
   }, []);
 
   const videoSrc = selectedVideo?.video_url
-    ? selectedVideo.video_url.startsWith("http")
-      ? selectedVideo.video_url
-      : `${API_BASE}${selectedVideo.video_url}`
+    ? resolveMediaUrl(selectedVideo.video_url)
     : null;
 
   function seekTo(sec: number) {
@@ -195,13 +282,37 @@ export default function App() {
         query: q,
         selected_event_id: followUpEvt?.event_id ?? null,
         session_id: result?.session_id ?? null,
+        object_classes: objectFilter ? [objectFilter] : null,
       });
       setResult(resp);
+      setProviderMode(resp.mode);
+      setAllEvents((prev) => {
+        const map = new Map(prev.map((e) => [e.event_id, e]));
+        for (const e of resp.events) map.set(e.event_id, e);
+        return Array.from(map.values());
+      });
       setSelectedEvent(null);
+      if (resp.events[0]) {
+        seekTo(resp.events[0].start_sec);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleGenerateReport() {
+    if (!result?.session_id) return;
+    setReportLoading(true);
+    setReport(null);
+    try {
+      const r = await postReport(result.session_id);
+      setReport(r);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReportLoading(false);
     }
   }
 
@@ -210,22 +321,24 @@ export default function App() {
     runInvestigation(query);
   }
 
-  const isMock = result?.mode === "mock" || !result;
+  const isMock = providerMode === "mock";
 
   return (
     <div className="app">
       <header className="app-header">
         <h1 className="app-title">SceneTrace</h1>
-        <span className="app-subtitle">Evidence-grounded video investigation</span>
-        {isMock && (
-          <span className="mock-badge" aria-label="Running in demo/mock mode">
-            ⚙ DEMO MODE — fixture data, not live inference
-          </span>
-        )}
+        <span className="app-subtitle">Evidence-grounded video investigation · Team 34</span>
+        <span
+          className={`mode-badge mode-badge--${providerMode}`}
+          aria-label={`Provider mode ${providerMode}`}
+        >
+          {isMock
+            ? "DEMO MODE — fixture data, not live inference"
+            : `LIVE · ${providerMode}`}
+        </span>
       </header>
 
       <main className="app-main">
-        {/* Video selector */}
         <section className="section section--selector" aria-label="Video selection">
           <label htmlFor="video-select" className="field-label">Footage</label>
           <select
@@ -236,6 +349,7 @@ export default function App() {
               setSelectedVideo(v);
               setResult(null);
               setSelectedEvent(null);
+              setAllEvents([]);
               setVideoError(null);
             }}
           >
@@ -251,7 +365,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Video player */}
         <section className="section section--player" aria-label="Video player">
           {videoSrc ? (
             <>
@@ -263,7 +376,7 @@ export default function App() {
                 preload="metadata"
                 onTimeUpdate={(e) => setCurrentTime((e.currentTarget as HTMLVideoElement).currentTime)}
                 onLoadedMetadata={(e) => setVideoDuration((e.currentTarget as HTMLVideoElement).duration)}
-                onError={() => setVideoError("Could not load video. Make sure the backend is running.")}
+                onError={() => setVideoError("Could not load video stream.")}
                 aria-label={selectedVideo?.title ?? "Video"}
               />
               {videoError && <p className="error-text">{videoError}</p>}
@@ -279,7 +392,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Query form */}
         <section className="section section--query" aria-label="Investigation query">
           <form onSubmit={handleSubmit} className="query-form">
             <label htmlFor="query-input" className="field-label">
@@ -292,7 +404,7 @@ export default function App() {
                 className="query-input"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="e.g. Find when someone sets down a box"
+                placeholder="e.g. forklift near a person in an aisle"
                 maxLength={500}
                 disabled={loading}
                 autoFocus
@@ -306,6 +418,22 @@ export default function App() {
                 {loading ? "Searching…" : "Investigate"}
               </button>
             </div>
+            <div className="filter-row">
+              <label htmlFor="object-filter" className="field-label">
+                Object filter (YOLO metadata)
+              </label>
+              <select
+                id="object-filter"
+                value={objectFilter}
+                onChange={(e) => setObjectFilter(e.target.value)}
+                disabled={loading}
+              >
+                <option value="">Any detected object</option>
+                {objectClasses.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
           </form>
           {loading && (
             <div className="progress" role="status" aria-live="polite">
@@ -315,20 +443,18 @@ export default function App() {
           )}
         </section>
 
-        {/* Errors */}
         {error && (
           <div className="error-banner" role="alert">
             <strong>Error:</strong> {error}
           </div>
         )}
 
-        {/* Results */}
         {result && (
           <section className="section section--results" aria-label="Investigation results">
             <div className="results-header">
               <p className="results-answer">{result.answer}</p>
               {result.warnings.map((w, i) => (
-                <p key={i} className="results-warning">⚠ {w}</p>
+                <p key={i} className="results-warning">{w}</p>
               ))}
             </div>
 
@@ -348,6 +474,12 @@ export default function App() {
                 />
               ))}
             </div>
+
+            <InvestigationTimeline
+              entries={result.timeline ?? []}
+              events={allEvents}
+              onJump={handleJump}
+            />
 
             {result.tool_trace.length > 0 && (
               <details
@@ -376,8 +508,22 @@ export default function App() {
                 </table>
               </details>
             )}
+
+            <div className="report-action">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleGenerateReport}
+                disabled={reportLoading}
+                aria-busy={reportLoading}
+              >
+                {reportLoading ? "Generating report…" : "Generate incident report"}
+              </button>
+            </div>
           </section>
         )}
+
+        {report && <ReportPanel report={report} />}
       </main>
     </div>
   );

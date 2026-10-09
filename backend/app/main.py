@@ -2,30 +2,45 @@
 from __future__ import annotations
 
 import logging
-import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response
 
 from app.agent import run_investigation
 from app.config import get_settings
-from app.media import get_video_list, is_valid_video_id, resolve_video_path
+from app.report import generate_report
+from app.media import (
+    ensure_video_known,
+    get_video_list_async,
+    is_valid_video_id,
+    resolve_video_path,
+)
+from app.providers.base import ProviderNotConfigured
+from app.providers.cosmos import CosmosReasoningProvider
 from app.providers.mock import (
     MockDetectionProvider,
     MockReasoningProvider,
     MockSearchProvider,
 )
+from app.providers.vast import VastSearchProvider
+from app.providers.vss_client import VssClient
+from app.providers.yolo import YoloDetectionProvider
 from app.schemas import (
     ErrorDetail,
     ErrorResponse,
+    IncidentReport,
+    IncidentReportRequest,
     InvestigateRequest,
     InvestigateResponse,
     ProviderMode,
     VideoInfo,
 )
+from app.video_registry import get_registry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,13 +48,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="SceneTrace", version="0.1.0")
-
 settings = get_settings()
 
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # noqa: ARG001
+    yield
+    if _vss_client is not None:
+        await _vss_client.aclose()
+
+
+app = FastAPI(title="SceneTrace", version="0.2.0", lifespan=_lifespan)
+
+_cors = (
+    ["*"]
+    if settings.scenetrace_mode in {"live", "hybrid"}
+    else settings.cors_origins
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=_cors,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -49,10 +77,60 @@ app.add_middleware(
 # Provider selection
 # ---------------------------------------------------------------------------
 
-_search = MockSearchProvider()
-_detection = MockDetectionProvider()
-_reasoning = MockReasoningProvider()
+_vss_client: VssClient | None = None
+_mock_search = MockSearchProvider()
+_mock_detection = MockDetectionProvider()
+_mock_reasoning = MockReasoningProvider()
+_live_search: VastSearchProvider | None = None
+_live_detection: YoloDetectionProvider | None = None
+_live_reasoning: CosmosReasoningProvider | None = None
 _mode = ProviderMode(settings.scenetrace_mode)
+
+
+def _init_providers() -> None:
+    global _vss_client, _live_search, _live_detection, _live_reasoning, _mode
+    _mode = ProviderMode(settings.scenetrace_mode)
+    if settings.scenetrace_mode == "mock":
+        return
+
+    if not settings.vss_configured:
+        if settings.scenetrace_mode == "live":
+            logger.error("Live mode requested but VSS credentials are not configured")
+            _mode = ProviderMode.mock
+        return
+
+    try:
+        _vss_client = VssClient(
+            base_url=settings.resolved_vss_url,
+            username=settings.resolved_vss_username,
+            password=settings.resolved_vss_password,
+            timeout=max(settings.search_timeout_seconds, 30.0),
+        )
+        _live_search = VastSearchProvider(_vss_client)
+        _live_detection = YoloDetectionProvider(_vss_client)
+        _live_reasoning = CosmosReasoningProvider(_vss_client)
+        logger.info("VSS live providers initialized (mode=%s)", _mode.value)
+    except ProviderNotConfigured as exc:
+        logger.error("VSS provider init failed: %s", exc)
+        _mode = ProviderMode.mock
+
+
+def _providers_for_video(video_id: str):
+    use_live = (
+        _mode in {ProviderMode.live, ProviderMode.hybrid}
+        and _live_search is not None
+        and video_id.startswith("vss-")
+    )
+    if use_live:
+        return _live_search, _live_detection, _live_reasoning, _mode
+    # demo-01 and mock path
+    mode = ProviderMode.mock if _mode == ProviderMode.mock else (
+        ProviderMode.hybrid if _live_search else ProviderMode.mock
+    )
+    return _mock_search, _mock_detection, _mock_reasoning, mode
+
+
+_init_providers()
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +153,9 @@ async def generic_error_handler(request: Request, exc: Exception) -> JSONRespons
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(
-            error=ErrorDetail(code="internal_error", message="An unexpected error occurred.")
+            error=ErrorDetail(
+                code="internal_error", message="An unexpected error occurred."
+            )
         ).model_dump(),
     )
 
@@ -86,32 +166,102 @@ async def generic_error_handler(request: Request, exc: Exception) -> JSONRespons
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "provider_mode": _mode.value}
+    return {
+        "status": "ok",
+        "provider_mode": _mode.value,
+        "vss_configured": settings.vss_configured,
+    }
 
 
 @app.get("/api/videos", response_model=list[VideoInfo])
 async def list_videos() -> list[VideoInfo]:
-    return get_video_list()
+    return await get_video_list_async(_vss_client)
+
+
+@app.get("/api/metadata/object-classes")
+async def list_object_classes() -> dict:
+    if _vss_client is None:
+        return {"field": "object_classes", "values": [], "count": 0}
+    try:
+        data = await _vss_client.metadata_values("object_classes", limit=80)
+        values = data.get("values") or []
+        return {
+            "field": "object_classes",
+            "values": values,
+            "count": len(values),
+        }
+    except Exception as exc:
+        logger.warning("object_classes metadata failed: %s", exc)
+        return {"field": "object_classes", "values": [], "count": 0, "error": str(exc)}
 
 
 @app.get("/api/videos/{video_id}/file")
 async def get_video_file(video_id: str, request: Request) -> Response:
-    if not is_valid_video_id(video_id):
+    # Demo local file
+    if video_id == "demo-01":
+        try:
+            path = resolve_video_path(video_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Video not found")
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Video file not on disk")
+        return _serve_local_range(path, request)
+
+    # Live VSS stream proxy (parent chunk preferred for timeline seeks)
+    entry = get_registry().get(video_id)
+    if entry is None or _vss_client is None:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    source = entry.original_video or entry.preview_source
+    if not source:
+        raise HTTPException(status_code=404, detail="No playable source for video")
+
+    range_header = request.headers.get("range")
     try:
-        path = resolve_video_path(video_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Video not found")
+        upstream = await _vss_client.stream_proxy_request(
+            source, range_header=range_header
+        )
+    except Exception as exc:
+        logger.error("Stream proxy failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Upstream video stream failed")
 
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Video file not on disk")
+    if upstream.status_code >= 400:
+        await upstream.aclose()
+        raise HTTPException(status_code=upstream.status_code, detail="Stream error")
 
+    headers = {}
+    for key in (
+        "Content-Type",
+        "Content-Length",
+        "Content-Range",
+        "Accept-Ranges",
+    ):
+        val = upstream.headers.get(key)
+        if val:
+            headers[key] = val
+    if "Accept-Ranges" not in headers:
+        headers["Accept-Ranges"] = "bytes"
+
+    async def body_iter():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(
+        body_iter(),
+        status_code=upstream.status_code,
+        headers=headers,
+        media_type=headers.get("Content-Type", "video/mp4"),
+    )
+
+
+def _serve_local_range(path: Path, request: Request) -> Response:
     range_header = request.headers.get("range")
     file_size = path.stat().st_size
 
     if range_header:
-        # Parse "bytes=start-end"
         try:
             byte_range = range_header.replace("bytes=", "")
             parts = byte_range.split("-")
@@ -151,25 +301,61 @@ async def investigate(req: InvestigateRequest) -> InvestigateResponse:
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="query must not be blank")
 
-    if not is_valid_video_id(req.video_id):
+    # Refresh explore cache lazily so first investigate on a listed id works.
+    if req.video_id.startswith("vss-") and not ensure_video_known(req.video_id):
+        if _vss_client is not None:
+            await get_video_list_async(_vss_client)
+        if not ensure_video_known(req.video_id):
+            raise HTTPException(
+                status_code=400, detail=f"Unknown video_id: {req.video_id!r}"
+            )
+    elif not is_valid_video_id(req.video_id) and not ensure_video_known(req.video_id):
         raise HTTPException(
-            status_code=400,
-            detail=f"Unknown video_id: {req.video_id!r}",
+            status_code=400, detail=f"Unknown video_id: {req.video_id!r}"
         )
 
-    videos = {v.id: v for v in get_video_list()}
+    videos = {v.id: v for v in await get_video_list_async(_vss_client)}
     duration = videos[req.video_id].duration_sec if req.video_id in videos else None
+    if duration is None:
+        entry = get_registry().get(req.video_id)
+        if entry:
+            duration = entry.duration_sec
 
+    search_p, det_p, reason_p, mode = _providers_for_video(req.video_id)
     try:
         return await run_investigation(
             req=req,
-            search_provider=_search,
-            detection_provider=_detection,
-            reasoning_provider=_reasoning,
-            mode=_mode,
+            search_provider=search_p,
+            detection_provider=det_p,
+            reasoning_provider=reason_p,
+            mode=mode,
             video_duration=duration,
             search_timeout=settings.search_timeout_seconds,
             reasoning_timeout=settings.reasoning_timeout_seconds,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/report", response_model=IncidentReport)
+async def create_report(req: IncidentReportRequest) -> IncidentReport:
+    if not req.session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id must not be blank")
+    try:
+        return generate_report(req.session_id, title=req.title)
+    except Exception as exc:
+        logger.error("Report generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Report generation failed")
+
+
+# Serve built frontend (deploy / local preview) when present.
+_STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
+if not _STATIC_DIR.exists():
+    _STATIC_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+if _STATIC_DIR.exists():
+    @app.get("/")
+    async def spa_index() -> FileResponse:
+        return FileResponse(_STATIC_DIR / "index.html")
+
+    app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
