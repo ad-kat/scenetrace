@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class ProviderNotConfigured(Exception):
@@ -16,6 +16,9 @@ class Candidate:
     score: float | None = None
     source_ref: str | None = None
     caption: str | None = None
+    original_video: str | None = None
+    object_classes: list[str] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
