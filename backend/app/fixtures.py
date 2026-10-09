@@ -61,6 +61,31 @@ FIXTURE_MAP: dict[str, list[FixtureEvent]] = {
             caption="Door motion candidate (demo fixture)",
         ),
     ],
+    "forklift": [
+        FixtureEvent(
+            start_sec=33.0,
+            end_sec=42.0,
+            explanation="A forklift is operating in close proximity to a worker in the aisle — potential safety incident.",
+            labels=["forklift", "person"],
+            caption="Forklift-worker proximity event (demo fixture)",
+        ),
+        FixtureEvent(
+            start_sec=78.0,
+            end_sec=86.0,
+            explanation="A forklift moves through a zone where a person is stationary — worker in travel path.",
+            labels=["forklift", "person"],
+            caption="Forklift incursion into worker zone (demo fixture)",
+        ),
+    ],
+    "safety": [
+        FixtureEvent(
+            start_sec=33.0,
+            end_sec=42.0,
+            explanation="A forklift-worker proximity event is identified — minimum safe separation may be violated.",
+            labels=["forklift", "person"],
+            caption="Safety proximity event (demo fixture)",
+        ),
+    ],
     "vehicle": [
         FixtureEvent(
             start_sec=88.0,

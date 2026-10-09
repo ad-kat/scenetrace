@@ -4,9 +4,10 @@ import {
   fetchObjectClasses,
   fetchVideos,
   postInvestigate,
+  postReport,
   resolveMediaUrl,
 } from "./api";
-import type { Event, InvestigateResponse, TimelineEntry, VideoInfo } from "./types";
+import type { Event, IncidentReport, InvestigateResponse, TimelineEntry, VideoInfo } from "./types";
 import "./App.css";
 
 function fmtTime(sec: number): string {
@@ -59,6 +60,12 @@ function EventCard({
           </span>
         )}
       </header>
+      {(evt.location || evt.camera_id) && (
+        <div className="event-card__meta">
+          {evt.location && <span className="meta-chip">📍 {evt.location}</span>}
+          {evt.camera_id && <span className="meta-chip">🎥 {evt.camera_id}</span>}
+        </div>
+      )}
       <p className="event-card__explanation">{evt.explanation}</p>
       {evt.evidence.length > 0 && (
         <details className="event-card__evidence">
@@ -186,6 +193,22 @@ function InvestigationTimeline({
   );
 }
 
+function ReportPanel({ report }: { report: IncidentReport }) {
+  return (
+    <section className="section section--report" aria-label="Incident report">
+      <h2 className="section-title">{report.title}</h2>
+      <p className="report-summary">{report.summary}</p>
+      {report.sections.map((sec, i) => (
+        <details key={i} className="report-section" open={i === 0}>
+          <summary className="report-section__heading">{sec.heading}</summary>
+          <pre className="report-section__content">{sec.content}</pre>
+        </details>
+      ))}
+      <p className="report-meta">Report ID: {report.report_id} · {report.generated_at}</p>
+    </section>
+  );
+}
+
 export default function App() {
   const [videos, setVideos] = useState<VideoInfo[]>([]);
   const [selectedVideo, setSelectedVideo] = useState<VideoInfo | null>(null);
@@ -202,6 +225,8 @@ export default function App() {
   const [objectClasses, setObjectClasses] = useState<string[]>([]);
   const [objectFilter, setObjectFilter] = useState<string>("");
   const [allEvents, setAllEvents] = useState<Event[]>([]);
+  const [report, setReport] = useState<IncidentReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -274,6 +299,20 @@ export default function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleGenerateReport() {
+    if (!result?.session_id) return;
+    setReportLoading(true);
+    setReport(null);
+    try {
+      const r = await postReport(result.session_id);
+      setReport(r);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReportLoading(false);
     }
   }
 
@@ -469,8 +508,22 @@ export default function App() {
                 </table>
               </details>
             )}
+
+            <div className="report-action">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleGenerateReport}
+                disabled={reportLoading}
+                aria-busy={reportLoading}
+              >
+                {reportLoading ? "Generating report…" : "Generate incident report"}
+              </button>
+            </div>
           </section>
         )}
+
+        {report && <ReportPanel report={report} />}
       </main>
     </div>
   );

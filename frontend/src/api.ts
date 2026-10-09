@@ -1,4 +1,5 @@
 import type {
+  IncidentReport,
   InvestigateRequest,
   InvestigateResponse,
   VideoInfo,
@@ -62,4 +63,16 @@ export async function fetchHealth(): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/health`);
   return handleResponse(res);
+}
+
+export async function postReport(
+  session_id: string,
+  title?: string,
+): Promise<IncidentReport> {
+  const res = await fetch(`${API_BASE}/api/report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id, title }),
+  });
+  return handleResponse<IncidentReport>(res);
 }

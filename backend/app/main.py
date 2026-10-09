@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -12,6 +13,7 @@ from starlette.responses import FileResponse, Response
 
 from app.agent import run_investigation
 from app.config import get_settings
+from app.report import generate_report
 from app.media import (
     ensure_video_known,
     get_video_list_async,
@@ -31,6 +33,8 @@ from app.providers.yolo import YoloDetectionProvider
 from app.schemas import (
     ErrorDetail,
     ErrorResponse,
+    IncidentReport,
+    IncidentReportRequest,
     InvestigateRequest,
     InvestigateResponse,
     ProviderMode,
@@ -44,8 +48,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="SceneTrace", version="0.2.0")
 settings = get_settings()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # noqa: ARG001
+    yield
+    if _vss_client is not None:
+        await _vss_client.aclose()
+
+
+app = FastAPI(title="SceneTrace", version="0.2.0", lifespan=_lifespan)
 
 _cors = (
     ["*"]
@@ -118,12 +131,6 @@ def _providers_for_video(video_id: str):
 
 
 _init_providers()
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    if _vss_client is not None:
-        await _vss_client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +335,17 @@ async def investigate(req: InvestigateRequest) -> InvestigateResponse:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/report", response_model=IncidentReport)
+async def create_report(req: IncidentReportRequest) -> IncidentReport:
+    if not req.session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id must not be blank")
+    try:
+        return generate_report(req.session_id, title=req.title)
+    except Exception as exc:
+        logger.error("Report generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Report generation failed")
 
 
 # Serve built frontend (deploy / local preview) when present.

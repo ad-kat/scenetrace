@@ -168,6 +168,32 @@ def test_video_file_invalid_id_returns_404():
 
 
 # ---------------------------------------------------------------------------
+# Incident report
+# ---------------------------------------------------------------------------
+
+def test_report_generates_from_session():
+    # Establish a session with events first.
+    r1 = client.post("/api/investigate", json={"video_id": "demo-01", "query": "forklift near person"})
+    assert r1.status_code == 200
+    session_id = r1.json()["session_id"]
+
+    r2 = client.post("/api/report", json={"session_id": session_id})
+    assert r2.status_code == 200
+    data = r2.json()
+    assert "report_id" in data
+    assert "generated_at" in data
+    assert "summary" in data
+    assert isinstance(data["sections"], list)
+    assert len(data["sections"]) > 0
+    assert isinstance(data["incidents"], list)
+
+
+def test_report_blank_session_id_returns_400():
+    r = client.post("/api/report", json={"session_id": "   "})
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # No secrets in response
 # ---------------------------------------------------------------------------
 

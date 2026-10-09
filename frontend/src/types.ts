@@ -28,6 +28,9 @@ export interface Event {
   verification: "verified_model" | "retrieval_only" | "unverified_mock";
   playback_source?: string | null;
   original_video?: string | null;
+  location?: string | null;
+  camera_id?: string | null;
+  filename?: string | null;
 }
 
 export interface ToolTraceEntry {
@@ -62,4 +65,21 @@ export interface InvestigateRequest {
   session_id?: string | null;
   object_classes?: string[] | null;
   metadata_filters?: Record<string, string> | null;
+}
+
+export interface IncidentReportSection {
+  heading: string;
+  content: string;
+}
+
+export interface IncidentReport {
+  report_id: string;
+  generated_at: string;
+  session_id: string;
+  title: string;
+  summary: string;
+  incidents: Event[];
+  sections: IncidentReportSection[];
+  uncertainty_notes: string[];
+  source_references: string[];
 }

@@ -57,6 +57,9 @@ class Event(BaseModel):
     verification: VerificationStatus = VerificationStatus.unverified_mock
     playback_source: str | None = None
     original_video: str | None = None
+    location: str | None = None
+    camera_id: str | None = None
+    filename: str | None = None
 
     @model_validator(mode="after")
     def _validate_times(self) -> "Event":
@@ -91,6 +94,28 @@ class InvestigateResponse(BaseModel):
     tool_trace: list[ToolTraceEntry] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     timeline: list[TimelineEntry] = Field(default_factory=list)
+
+
+class IncidentReportRequest(BaseModel):
+    session_id: str
+    title: str | None = None
+
+
+class IncidentReportSection(BaseModel):
+    heading: str
+    content: str
+
+
+class IncidentReport(BaseModel):
+    report_id: str
+    generated_at: str  # ISO 8601
+    session_id: str
+    title: str
+    summary: str
+    incidents: list[Event] = Field(default_factory=list)
+    sections: list[IncidentReportSection] = Field(default_factory=list)
+    uncertainty_notes: list[str] = Field(default_factory=list)
+    source_references: list[str] = Field(default_factory=list)
 
 
 class ErrorDetail(BaseModel):

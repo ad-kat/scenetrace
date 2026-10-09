@@ -66,6 +66,10 @@ class SessionStore:
 _session_store = SessionStore()
 
 
+def get_session_store() -> SessionStore:
+    return _session_store
+
+
 def _dedup_candidates(candidates: list[Candidate]) -> list[Candidate]:
     kept: list[Candidate] = []
     for c in candidates:
@@ -358,6 +362,10 @@ async def run_investigation(
         else:
             verification = VerificationStatus.retrieval_only
 
+        loc = c.extra.get("location") or (entry.location if entry else None)
+        cam = c.extra.get("camera_id") or (entry.camera_id if entry else None)
+        fname = c.extra.get("filename") or (entry.filename if entry else None)
+
         events.append(
             Event(
                 event_id=evt_id,
@@ -371,6 +379,9 @@ async def run_investigation(
                 verification=verification,
                 playback_source=c.source_ref,
                 original_video=c.original_video or original_video,
+                location=str(loc) if loc else None,
+                camera_id=str(cam) if cam else None,
+                filename=str(fname) if fname else None,
             )
         )
 
