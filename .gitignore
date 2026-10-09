@@ -1,9 +1,16 @@
 .env
 .env.local
 .venv/
+docs/
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 node_modules/
 dist/
 *.mp4
 *.mov
 .DS_Store
+backend/tracenv/
+media/
